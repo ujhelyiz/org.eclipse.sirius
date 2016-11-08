@@ -20,11 +20,14 @@ import java.util.Set;
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.NullProgressMonitor;
+import org.eclipse.core.runtime.Status;
 import org.eclipse.emf.common.command.Command;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.resource.Resource;
 import org.eclipse.emf.ecore.util.EcoreUtil;
+import org.eclipse.emf.transaction.RecordingCommand;
 import org.eclipse.emf.transaction.RunnableWithResult;
 import org.eclipse.emf.transaction.TransactionalEditingDomain;
 import org.eclipse.emf.workspace.util.WorkspaceSynchronizer;
@@ -40,6 +43,7 @@ import org.eclipse.sirius.viewpoint.SiriusPlugin;
 import org.eclipse.sirius.viewpoint.SyncStatus;
 
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.LinkedHashMultimap;
 import com.google.common.collect.Lists;
@@ -190,9 +194,12 @@ public class SessionResourcesSynchronizer implements ResourceSyncClient {
         }
         List<Resource> resourcesBeforeReload = Lists.newArrayList(ted.getResourceSet().getResources());
         /* execute the reload operation as a read-only transaction */
-        RunnableWithResult<?> reload = new RunnableWithResult.Impl<Object>() {
+        RecordingCommand reload = new RecordingCommand(ted) {
+            
+            IStatus result;
+            
             @Override
-            public void run() {
+            protected void doExecute() {
                 session.disableCrossReferencerResolve(resource);
                 resource.unload();
                 session.enableCrossReferencerResolve(resource);
@@ -200,17 +207,31 @@ public class SessionResourcesSynchronizer implements ResourceSyncClient {
                     resource.load(Collections.EMPTY_MAP);
                     EcoreUtil.resolveAll(resource);
                     session.getSemanticCrossReferencer().resolveProxyCrossReferences(resource);
+                    result = Status.OK_STATUS;
                 } catch (IOException e) {
-                    setResult(e);
+                    result = new Status(IStatus.ERROR, "org.eclipse.sirius", e.getMessage(), e); //$NON-NLS-1$
                 }
+                
             }
+
+            @Override
+            public Collection<?> getResult() {
+                return ImmutableList.of(result);
+            }
+            
+            
         };
-        try {
-            ted.runExclusive(reload);
-            if (reload.getResult() != null) {
-                throw (IOException) reload.getResult();
-            } else if (!reload.getStatus().isOK()) {
+//        try {
+            ted.getCommandStack().execute(reload);
+            //ted.runExclusive(reload);
+            IStatus result = (IStatus) (reload.getResult().iterator().next());
+            if (!result.isOK()) {
+                if (result.getException() instanceof IOException) {                    
+                    throw (IOException) result.getException();
+                } else {
+//            } else if (!reload.getStatus().isOK()) {
                 SiriusPlugin.getDefault().error(Messages.SessionResourcesSynchronizer_reloadOperationFailErrorMsg, null);
+                }
             } else {
                 if (representationsResource) {
                     ted.getCommandStack().execute(reloadingAnalysisCmd);
@@ -223,9 +244,9 @@ public class SessionResourcesSynchronizer implements ResourceSyncClient {
                 session.discoverAutomaticallyLoadedResources(resourcesBeforeReload);
                 session.notifyListeners(SessionListener.REPLACED);
             }
-        } catch (InterruptedException e) {
-            // do nothing
-        }
+//        } catch (InterruptedException e) {
+//            // do nothing
+//        }
     }
 
     /**
